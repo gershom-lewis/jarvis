@@ -4,4 +4,5 @@ sounddevice>=0.4
 soundfile>=0.12
 edge-tts>=6.1
 playsound==1.2.2
+requests>=2.31
 numpy>=1.24
