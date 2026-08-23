@@ -64,4 +64,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if "--wake" in sys.argv:
+        from wake import wake_loop
+        wake_loop()
+        sys.exit(0)
     sys.exit(main())
