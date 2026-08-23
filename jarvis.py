@@ -35,7 +35,7 @@ def main() -> int:
         print(f"  {exc}")
         return 1
 
-    greeting = "Online and ready, Gershom. What do you need?"
+    greeting = "Iris online and ready, Gershom. What do you need?"
     print(f"\nJARVIS: {greeting}")
     speak(greeting)
 
