@@ -7,6 +7,7 @@ crosses back and forth — never the key.
 """
 
 import os
+from datetime import datetime
 from anthropic import Anthropic
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -81,10 +82,18 @@ class Brain:
     def ask(self, text: str) -> str:
         self.history.append({"role": "user", "content": text})
         try:
+            now = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
+        except Exception:
+            now = ""
+        dated_system = (
+            f"Right now it is {now} (Gershom's local time). Use this whenever asked "
+            "the date, day, or time — state it plainly, never guess.\n\n" + self.system
+        )
+        try:
             msg = self.client.messages.create(
                 model=self.model,
                 max_tokens=400,
-                system=self.system,
+                system=dated_system,
                 messages=self.history[-12:],  # last few turns of context
             )
         except Exception as exc:
