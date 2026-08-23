@@ -55,5 +55,9 @@ def transcribe(audio: np.ndarray, size: str = WHISPER_MODEL) -> str:
     if audio is None or len(audio) < int(SAMPLE_RATE * 0.3):  # under ~0.3s = nothing
         return ""
     model = get_model(size)
-    segments, _info = model.transcribe(audio, language="en", vad_filter=True)
+    # beam_size=1 (greedy) + no cross-segment conditioning = much faster, lower latency.
+    segments, _info = model.transcribe(
+        audio, language="en", vad_filter=True,
+        beam_size=1, condition_on_previous_text=False,
+    )
     return " ".join(seg.text for seg in segments).strip()
