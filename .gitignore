@@ -3,6 +3,10 @@
 *.env
 !.env.example
 
+# --- private local context (owner's world; never publish) ---
+context.md
+!context.example.md
+
 # --- python / os ---
 __pycache__/
 *.py[cod]

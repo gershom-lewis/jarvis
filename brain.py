@@ -51,9 +51,20 @@ def build_system() -> str:
         "don't know or can't do something, say so plainly. You are the voice of his "
         "AI executive team; speak like a sharp chief of staff who has his back."
     )
+    ctx_path = os.path.join(HERE, "context.md")
+    context = ""
+    if os.path.exists(ctx_path):
+        try:
+            context = open(ctx_path, encoding="utf-8").read()
+        except Exception:
+            context = ""
+
+    parts = [base]
     if identity:
-        return base + "\n\n--- Your identity and who you serve ---\n" + identity
-    return base
+        parts.append("--- Your identity and who you serve ---\n" + identity)
+    if context:
+        parts.append("--- Gershom's live world (what's going on right now — know this) ---\n" + context)
+    return "\n\n".join(parts)
 
 
 class Brain:
