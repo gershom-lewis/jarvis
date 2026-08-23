@@ -6,18 +6,20 @@ Iris (JARVIS) — mouth. Tiered text-to-speech, best available first:
   2. Microsoft edge-tts neural (free, no key) — natural, needs internet.
   3. Built-in Windows voice (offline safety net).
 
-Set the ElevenLabs voice by pasting a Voice ID from the ElevenLabs Voice Library
-into ELEVENLABS_VOICE. Change the free voice with JARVIS_VOICE.
+Each reply is written to its OWN temp file so Windows never locks us out of a
+reused one (that lock is what silently drops us to the robot voice).
 """
 
 import asyncio
+import glob
 import os
 import tempfile
+import uuid
 
 import edge_tts
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-_TMP = os.path.join(tempfile.gettempdir(), "jarvis_tts.mp3")
+_TMPDIR = tempfile.gettempdir()
 
 
 def _load_env(path: str = os.path.join(HERE, ".env")) -> dict:
@@ -35,6 +37,22 @@ _CFG = _load_env()
 ELEVEN_KEY = _CFG.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVENLABS_API_KEY")
 ELEVEN_VOICE = _CFG.get("ELEVENLABS_VOICE", "")
 EDGE_VOICE = _CFG.get("JARVIS_VOICE") or os.environ.get("JARVIS_VOICE", "en-US-AriaNeural")
+
+
+def _purge_old() -> None:
+    """Best-effort cleanup of previous temp clips (some may still be locked)."""
+    for f in glob.glob(os.path.join(_TMPDIR, "iris_tts_*.mp3")):
+        try:
+            os.remove(f)
+        except Exception:
+            pass
+
+
+_purge_old()
+
+
+def _fresh_tmp() -> str:
+    return os.path.join(_TMPDIR, f"iris_tts_{uuid.uuid4().hex}.mp3")
 
 
 def _play(path: str) -> None:
@@ -55,6 +73,7 @@ def speak(text: str) -> None:
 def _speak_elevenlabs(text: str) -> bool:
     """Premium human-level voice via the ElevenLabs REST API."""
     import requests
+    path = _fresh_tmp()
     try:
         resp = requests.post(
             f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE}",
@@ -71,9 +90,9 @@ def _speak_elevenlabs(text: str) -> bool:
             timeout=30,
         )
         if resp.status_code == 200 and resp.content:
-            with open(_TMP, "wb") as fh:
+            with open(path, "wb") as fh:
                 fh.write(resp.content)
-            _play(_TMP)
+            _play(path)
             return True
         print(f"  (ElevenLabs {resp.status_code}: {resp.text[:120]} — using free voice)")
     except Exception as exc:
@@ -83,9 +102,10 @@ def _speak_elevenlabs(text: str) -> bool:
 
 def _speak_edge(text: str) -> bool:
     """Free neural voice via Microsoft edge-tts."""
+    path = _fresh_tmp()
     try:
-        asyncio.run(edge_tts.Communicate(text, EDGE_VOICE).save(_TMP))
-        _play(_TMP)
+        asyncio.run(edge_tts.Communicate(text, EDGE_VOICE).save(path))
+        _play(path)
         return True
     except Exception as exc:
         print(f"  (neural voice unavailable: {exc} — using local voice)")
