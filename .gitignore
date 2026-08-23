@@ -1,0 +1,13 @@
+# --- SECRETS ---
+.env
+*.env
+!.env.example
+
+# --- python / os ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.wav
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+anthropic>=0.40
+faster-whisper>=1.0
+sounddevice>=0.4
+soundfile>=0.12
+pyttsx3>=2.90
+numpy>=1.24
