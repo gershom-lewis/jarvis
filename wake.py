@@ -1,23 +1,21 @@
 """
 Iris — v0.2 wake word ("Hey Iris") + conversation mode. Always-listening, hands-free.
 
-HARDENED (automation-hardening standard, since the mic is always on):
-  • The listen loop never dies silently — mic/transcription hiccups are caught
-    and it keeps listening.
-  • Ctrl+C stops it cleanly.
-  • It only calls the Claude API when a wake word or an active follow-up fires,
-    so cost stays controlled.
-  • Foreground app you start/stop — nothing to persist across reboot.
+HARDENED for reliability (the listening side is the flaky part, not the brain/voice):
+  • ONE persistent mic stream for the whole session (no open/close glitches).
+  • ADAPTIVE noise floor — the trigger threshold tracks your room, so it doesn't
+    miss you in a quiet room or fire on background noise.
+  • NOISE GUARD — ignores blips that are too short/quiet (no answering to nothing).
+  • She STOPS listening while she talks, then flushes the mic — so she never hears
+    her own voice and false-triggers.
+  • Never dies silently; Ctrl+C stops cleanly; API fires only on a real command.
 
-Conversation mode: after Iris answers, she stays listening for a follow-up for a
-few seconds (no wake word needed). If you go quiet, she drops back to waiting for
-"Hey Iris".
-
-Wake detection uses local Whisper (free, no keys). Swap in Picovoice Porcupine
-later for lighter always-on CPU.
+Mic: set MIC_DEVICE (index or name) to use a specific mic. List them with
+`python jarvis.py --mics`. Accuracy: set WHISPER_MODEL (small / small.en / medium).
 """
 
 import collections
+import os
 import time
 
 import numpy as np
@@ -28,57 +26,70 @@ from stt import transcribe
 from tts import speak
 
 SR = 16000
-BLOCK = int(SR * 0.03)  # 30 ms frames
-WAKE_WORDS = ("hey iris", "iris", "irises", "irish")  # tolerate common mis-hears
-FOLLOWUP_SECONDS = 8  # how long she keeps listening after an answer
+BLOCK = int(SR * 0.03)  # 30 ms
+WAKE_WORDS = ("hey iris", "iris", "irises", "irish")
+FOLLOWUP_SECONDS = 8
+
+_MIC = os.environ.get("MIC_DEVICE")
+if _MIC is not None and _MIC.strip().isdigit():
+    _MIC = int(_MIC.strip())
 
 
 def _rms(x: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(x))) + 1e-9)
 
 
-def calibrate(seconds: float = 1.0) -> float:
-    frames = []
-    with sd.InputStream(samplerate=SR, channels=1, dtype="float32") as s:
-        for _ in range(int(seconds / 0.03)):
-            data, _ = s.read(BLOCK)
-            frames.append(data.copy())
-    ambient = _rms(np.concatenate(frames).flatten())
-    return max(0.014, ambient * 3.0)
+def _flush(stream, secs: float = 0.25) -> None:
+    """Discard whatever's buffered (e.g. the tail of Iris's own reply)."""
+    for _ in range(int(secs / 0.03)):
+        try:
+            stream.read(BLOCK)
+        except Exception:
+            break
 
 
-def record_utterance(threshold: float, max_sec: float = 9.0, silence_sec: float = 0.8,
-                     preroll_sec: float = 0.3, wait_timeout=None) -> np.ndarray:
-    """Wait for speech, record until ~silence, return the audio. If wait_timeout is
-    set and no speech starts within it, return an empty array."""
+def _read_utterance(stream, thr_fn, wait_timeout=None,
+                    max_sec=12.0, silence_sec=0.9, preroll_sec=0.35) -> np.ndarray:
+    """Read from the live stream: wait for speech, capture until ~silence.
+    Returns empty if it times out waiting, or if the clip is just noise."""
     pre = collections.deque(maxlen=max(1, int(preroll_sec / 0.03)))
     rec: list = []
     started = False
     silent = 0.0
+    speech_frames = 0
     t_wait = time.time()
     t_rec = time.time()
-    with sd.InputStream(samplerate=SR, channels=1, dtype="float32") as s:
-        while True:
-            data, _ = s.read(BLOCK)
-            block = data.copy().flatten()
-            energy = _rms(block)
-            if not started:
-                pre.append(block)
-                if energy > threshold:
-                    started = True
-                    rec.extend(pre)
-                    rec.append(block)
-                    t_rec = time.time()
-                elif wait_timeout is not None and (time.time() - t_wait) > wait_timeout:
-                    return np.zeros(0, dtype=np.float32)
-            else:
+    while True:
+        data, _ = stream.read(BLOCK)
+        block = np.asarray(data, dtype=np.float32).flatten()
+        energy = _rms(block)
+        thr = thr_fn(energy, started)
+        if not started:
+            pre.append(block)
+            if energy > thr:
+                started = True
+                rec.extend(pre)
                 rec.append(block)
-                silent = silent + 0.03 if energy < threshold else 0.0
-                if silent >= silence_sec or (time.time() - t_rec) > max_sec:
-                    break
+                speech_frames = 1
+                t_rec = time.time()
+            elif wait_timeout is not None and (time.time() - t_wait) > wait_timeout:
+                return np.zeros(0, dtype=np.float32)
+        else:
+            rec.append(block)
+            if energy > thr:
+                speech_frames += 1
+                silent = 0.0
+            else:
+                silent += 0.03
+            if silent >= silence_sec or (time.time() - t_rec) > max_sec:
+                break
     if not rec:
         return np.zeros(0, dtype=np.float32)
-    return np.concatenate(rec).flatten().astype(np.float32)
+    audio = np.concatenate(rec).flatten().astype(np.float32)
+    # noise guard: need enough real speech, not a blip
+    if len(audio) / SR < 0.35 or speech_frames < 8:
+        return np.zeros(0, dtype=np.float32)
+    return audio
 
 
 def _command_after_wake(text: str) -> str:
@@ -95,44 +106,80 @@ def wake_loop() -> None:
     print("  Iris — wake word + conversation mode")
     print("=" * 54)
     brain = Brain()
-    print("  Calibrating the mic — stay quiet for a second…")
-    threshold = calibrate()
+
+    try:
+        stream = sd.InputStream(samplerate=SR, channels=1, dtype="float32",
+                                device=_MIC, blocksize=BLOCK)
+        stream.start()
+    except Exception as exc:
+        print(f"  Could not open the mic: {exc}")
+        print("  Tip: list mics with  python jarvis.py --mics  then set MIC_DEVICE in .env")
+        return
+
+    # Calibrate ambient noise from the live stream, then keep adapting it.
+    amb = []
+    for _ in range(int(1.0 / 0.03)):
+        d, _ = stream.read(BLOCK)
+        amb.append(_rms(np.asarray(d, dtype=np.float32).flatten()))
+    noise = [max(0.004, float(np.median(amb)))]
+
+    def thr_fn(energy: float, started: bool) -> float:
+        if not started and energy < noise[0] * 1.5:      # adapt only during quiet
+            noise[0] = 0.97 * noise[0] + 0.03 * energy
+        return max(0.010, noise[0] * 3.2)
+
     speak("Wake word active. Just say, hey Iris.")
-    print(f"  Listening for 'Hey Iris'…  (Ctrl+C to stop)   [threshold {threshold:.3f}]")
+    print(f"  Listening for 'Hey Iris'…  (Ctrl+C to stop)   [noise {noise[0]:.4f}]")
 
     in_convo = False
-    while True:
-        try:
-            if in_convo:
-                # follow-up window: listen for a command WITHOUT the wake word
-                audio = record_utterance(threshold, wait_timeout=FOLLOWUP_SECONDS)
-                if len(audio) == 0:
+    try:
+        while True:
+            try:
+                if in_convo:
+                    audio = _read_utterance(stream, thr_fn, wait_timeout=FOLLOWUP_SECONDS)
+                    if len(audio) == 0:
+                        in_convo = False
+                        print("  … back to 'Hey Iris'.")
+                        continue
+                    cmd = transcribe(audio)
+                else:
+                    heard = transcribe(_read_utterance(stream, thr_fn))
+                    if not heard or not any(w in heard.lower() for w in WAKE_WORDS):
+                        continue
+                    cmd = _command_after_wake(heard)
+                    if len(cmd) < 2:
+                        # stop mic while she prompts, then flush so she doesn't hear herself
+                        stream.stop(); speak("Yes?"); stream.start(); _flush(stream)
+                        cmd = transcribe(_read_utterance(stream, thr_fn, wait_timeout=FOLLOWUP_SECONDS))
+
+                if not cmd:
                     in_convo = False
-                    print("  … back to 'Hey Iris'.")
                     continue
-                cmd = transcribe(audio)
-            else:
-                heard = transcribe(record_utterance(threshold))
-                if not heard or not any(w in heard.lower() for w in WAKE_WORDS):
-                    continue  # not addressed to Iris
-                cmd = _command_after_wake(heard)
-                if len(cmd) < 2:          # they only said "Hey Iris"
-                    speak("Yes?")
-                    cmd = transcribe(record_utterance(threshold, wait_timeout=FOLLOWUP_SECONDS))
 
-            if not cmd:
+                print(f"  You: {cmd}")
+                reply = brain.ask(cmd)
+                print(f"  Iris: {reply}")
+                # stop listening while she speaks; flush her echo before follow-up
+                stream.stop()
+                speak(reply)
+                stream.start()
+                _flush(stream)
+                in_convo = True
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:  # never die silently
+                print(f"  (hiccup: {exc} — still listening)")
                 in_convo = False
+                try:
+                    if not stream.active:
+                        stream.start()
+                except Exception:
+                    pass
                 continue
-
-            print(f"  You: {cmd}")
-            reply = brain.ask(cmd)
-            print(f"  Iris: {reply}")
-            speak(reply)
-            in_convo = True  # stay open for a natural follow-up
-        except KeyboardInterrupt:
-            print("\n  Wake word off. Talk soon.")
-            break
-        except Exception as exc:  # never die silently
-            print(f"  (hiccup: {exc} — still listening)")
-            in_convo = False
-            continue
+    except KeyboardInterrupt:
+        print("\n  Wake word off. Talk soon.")
+    finally:
+        try:
+            stream.stop(); stream.close()
+        except Exception:
+            pass

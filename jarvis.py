@@ -64,6 +64,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if "--mics" in sys.argv:
+        import sounddevice as sd
+        print("Input devices (set the index as MIC_DEVICE in .env):")
+        for i, d in enumerate(sd.query_devices()):
+            if d.get("max_input_channels", 0) > 0:
+                print(f"  {i}: {d['name']}")
+        sys.exit(0)
     if "--wake" in sys.argv:
         from wake import wake_loop
         wake_loop()
