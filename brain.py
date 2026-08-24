@@ -10,6 +10,8 @@ import os
 from datetime import datetime
 from anthropic import Anthropic
 
+from tools import TOOL_SCHEMAS, run_tool
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 JARVIS_ID = r"C:\Users\gersh\.claude\brain\executive-team\jarvis\identity-files"
 BIGCHIEF_ID = r"C:\Users\gersh\.claude\brain\executive-team\big-chief\identity-files"
@@ -89,18 +91,34 @@ class Brain:
             f"Right now it is {now} (Gershom's local time). Use this whenever asked "
             "the date, day, or time — state it plainly, never guess.\n\n" + self.system
         )
-        try:
-            msg = self.client.messages.create(
-                model=self.model,
-                max_tokens=400,
-                system=dated_system,
-                messages=self.history[-12:],  # last few turns of context
-            )
-        except Exception as exc:
-            self.history.pop()  # don't keep the failed turn
-            return f"I hit a snag reaching my brain: {exc}"
-        reply = "".join(
-            b.text for b in msg.content if getattr(b, "type", None) == "text"
-        ).strip()
-        self.history.append({"role": "assistant", "content": reply})
-        return reply
+        # Tool-use loop: she can search + read Gershom's docs before answering.
+        for _ in range(4):  # bounded rounds
+            try:
+                msg = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=500,
+                    system=dated_system,
+                    messages=self.history,
+                    tools=TOOL_SCHEMAS,
+                )
+            except Exception as exc:
+                return f"I hit a snag reaching my brain: {exc}"
+
+            self.history.append({"role": "assistant", "content": msg.content})
+            tool_uses = [b for b in msg.content if getattr(b, "type", None) == "tool_use"]
+            if not tool_uses:
+                return "".join(
+                    b.text for b in msg.content if getattr(b, "type", None) == "text"
+                ).strip()
+
+            results = []
+            for tu in tool_uses:
+                out = run_tool(tu.name, tu.input)
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tu.id,
+                    "content": str(out)[:8000],
+                })
+            self.history.append({"role": "user", "content": results})
+
+        return "I dug through your docs but couldn't pull that together cleanly — ask me a different way?"
