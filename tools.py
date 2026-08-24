@@ -21,6 +21,10 @@ ALLOWED_ROOTS = [
     r"C:\Users\gersh\vannah",
     r"C:\Users\gersh\python-bridge",
     r"C:\Users\gersh\jarvis",
+    # The Command Center dashboard's DATA — his projects, calendar, priorities,
+    # workspaces, round-table, Guardian score (real.ts = live, seed.ts = demo).
+    # Read-only, so Iris can speak to the dashboard + calendar.
+    r"C:\Users\gersh\ai-os-command-center\src\data",
 ]
 TEXT_EXT = (".md", ".html", ".txt", ".py", ".js", ".ts", ".json")
 SECRET_HINTS = (".env", "secret", "credential", "apikey", "api_key", ".key", ".pem",
@@ -99,12 +103,35 @@ def read_doc(path: str, max_chars: int = 6000) -> str:
     return txt
 
 
+_DASH_DIR = r"C:\Users\gersh\ai-os-command-center\src\data"
+
+
+def get_dashboard() -> str:
+    """Read Gershom's live Command Center dashboard state (calendar, projects,
+    priorities, briefing, workspaces) straight from real.ts — reliable, not a
+    fuzzy search. Falls back to seed.ts (demo) if the live file isn't present."""
+    for name in ("real.ts", "seed.ts"):
+        p = os.path.join(_DASH_DIR, name)
+        if os.path.isfile(p):
+            try:
+                txt = open(p, encoding="utf-8", errors="ignore").read()
+            except Exception as exc:
+                return f"Could not read the dashboard: {exc}"
+            tag = "LIVE" if name == "real.ts" else "DEMO"
+            return (f"[Gershom's Command Center dashboard — {tag} state, from {name}. "
+                    f"His calendar, projects, priorities, briefing and workspaces:]\n"
+                    + (txt[:6500] + "\n…(truncated)…" if len(txt) > 6500 else txt))
+    return "Dashboard data not found."
+
+
 def run_tool(name: str, args: dict) -> str:
     try:
         if name == "search_docs":
             return search_docs(str(args.get("query", "")))
         if name == "read_doc":
             return read_doc(str(args.get("path", "")))
+        if name == "get_dashboard":
+            return get_dashboard()
     except Exception as exc:
         return f"Tool error: {exc}"
     return f"Unknown tool: {name}"
@@ -114,10 +141,13 @@ def run_tool(name: str, args: dict) -> str:
 TOOL_SCHEMAS = [
     {
         "name": "search_docs",
-        "description": ("Search Gershom's project docs, code, and brain for a topic. "
-                        "Use this whenever he asks about the status or details of ANY "
-                        "project (Guardian, Vannah, Savannah, the dashboard, SEEC, a doc, "
-                        "etc.). Returns matching file paths + snippets."),
+        "description": ("Search Gershom's project docs, code, brain, AND his Command "
+                        "Center dashboard data for a topic. Use this whenever he asks "
+                        "about the status/details of ANY project (Guardian, Vannah, "
+                        "Savannah, SEEC, a doc), OR about his DASHBOARD, CALENDAR, "
+                        "schedule, what's on this week, his priorities, or his projects — "
+                        "his calendar and dashboard state live in the command-center data "
+                        "(real.ts). Returns matching file paths + snippets."),
         "input_schema": {
             "type": "object",
             "properties": {"query": {"type": "string", "description": "keywords to search for"}},
@@ -134,5 +164,14 @@ TOOL_SCHEMAS = [
             "properties": {"path": {"type": "string", "description": "the file path to read"}},
             "required": ["path"],
         },
+    },
+    {
+        "name": "get_dashboard",
+        "description": ("Get Gershom's Command Center dashboard state — his CALENDAR, "
+                        "projects, priorities, daily briefing, and workspaces. Use this "
+                        "FIRST (not search) whenever he asks about his calendar, schedule, "
+                        "what's on this week/today, his priorities, project status, or "
+                        "what the dashboard says. Reliable and direct."),
+        "input_schema": {"type": "object", "properties": {}},
     },
 ]
